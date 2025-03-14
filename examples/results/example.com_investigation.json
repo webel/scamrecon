@@ -1,0 +1,90 @@
+{
+  "domain": "example.com",
+  "scan_time": "2025-03-14 14:41:02",
+  "is_cloudflare_protected": false,
+  "main_ip_addresses": [
+    "23.215.0.138",
+    "96.7.128.175",
+    "96.7.128.198",
+    "23.192.228.80",
+    "23.192.228.84",
+    "23.215.0.136"
+  ],
+  "cloudflare_status": {
+    "23.215.0.138": false,
+    "96.7.128.175": false,
+    "96.7.128.198": false,
+    "23.192.228.80": false,
+    "23.192.228.84": false,
+    "23.215.0.136": false
+  },
+  "origin_candidates": [
+    {
+      "ip": "2a05:d014:58f:6202::65",
+      "source": "urlscan.io scan",
+      "confidence": "Medium",
+      "server": "Netlify"
+    }
+  ],
+  "confirmed_origins": [
+    {
+      "ip": "23.215.0.138",
+      "verification_data": {
+        "is_origin": true,
+        "confidence": "High"
+      }
+    },
+    {
+      "ip": "96.7.128.175",
+      "verification_data": {
+        "is_origin": true,
+        "confidence": "High"
+      }
+    },
+    {
+      "ip": "96.7.128.198",
+      "verification_data": {
+        "is_origin": true,
+        "confidence": "High"
+      }
+    },
+    {
+      "ip": "23.192.228.80",
+      "verification_data": {
+        "is_origin": true,
+        "confidence": "High"
+      }
+    },
+    {
+      "ip": "23.192.228.84",
+      "verification_data": {
+        "is_origin": true,
+        "confidence": "High"
+      }
+    },
+    {
+      "ip": "23.215.0.136",
+      "verification_data": {
+        "is_origin": true,
+        "confidence": "High"
+      }
+    }
+  ],
+  "subdomains": [],
+  "dns_records": {},
+  "ssl_info": {},
+  "security_issues": [],
+  "malware_detections": {},
+  "technology_stack": [],
+  "historical_ips": [],
+  "whois_info": {
+    "registrar": "Unknown",
+    "creation_date": "Unknown",
+    "updated_date": "Unknown",
+    "expiry_date": "Unknown",
+    "nameservers": [],
+    "privacy_protection": false
+  },
+  "http_headers": {},
+  "nameservers": []
+}
