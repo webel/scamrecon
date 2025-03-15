@@ -159,23 +159,28 @@ class ScreenshotCapture:
             pass
 
 
-def batch_capture_screenshots(csv_file: str, output_dir: str = "screenshots") -> None:
+def batch_capture_screenshots(csv_file: str, output_dir: str = "screenshots", skip_lines: int = 0) -> None:
     """
     Capture screenshots for multiple domains from a CSV file.
 
     Args:
         csv_file: Path to CSV file with domains
         output_dir: Directory to save screenshots
+        skip_lines: Number of lines to skip from the CSV file
     """
     try:
         # Load domains from CSV
-        df = pd.read_csv(csv_file)
-        log(f"Loaded {len(df)} entries from {csv_file}", "success")
+        df = pd.read_csv(csv_file, skiprows=skip_lines)
+        log(f"Loaded {len(df)} entries from {csv_file} (skipped {skip_lines} lines)", "success")
 
         # Extract domains
         domains = []
-        # Check for columns with and without trailing spaces
-        if "id" in df.columns:
+        # Always use the second column (index 1) which should contain domains
+        # This handles both with and without headers correctly
+        if len(df.columns) >= 2:
+            domains = df.iloc[:, 1].tolist()  # Always use the second column for domains
+        # Fallback options if second column doesn't exist
+        elif "id" in df.columns:
             domains = df["id"].tolist()
         elif "id " in df.columns:
             domains = df["id "].tolist()
@@ -183,11 +188,8 @@ def batch_capture_screenshots(csv_file: str, output_dir: str = "screenshots") ->
             domains = df["domain"].tolist()
         elif "domain " in df.columns:
             domains = df["domain "].tolist()
-        elif len(df.columns) >= 2:
-            col_name = df.columns[1]
-            domains = df[col_name].tolist()
         else:
-            domains = df.iloc[:, 0].tolist()
+            domains = df.iloc[:, 0].tolist()  # Last resort: use first column
 
         # Filter valid domains and strip any trailing spaces
         domains = [d.strip() if isinstance(d, str) else d for d in domains]

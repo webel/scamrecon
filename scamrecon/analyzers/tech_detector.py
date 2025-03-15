@@ -343,7 +343,7 @@ class TechDetector:
 
 
 def process_domains(
-    csv_file: str, output_dir: str = "tech_results", timeout: int = 20
+    csv_file: str, output_dir: str = "tech_results", timeout: int = 20, skip_lines: int = 0
 ) -> None:
     """
     Process all domains in CSV file.
@@ -352,19 +352,24 @@ def process_domains(
         csv_file: Path to CSV file with domains
         output_dir: Directory to save results
         timeout: Page load timeout in seconds
+        skip_lines: Number of lines to skip from the CSV file
     """
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
 
     # Load domains
     try:
-        df = pd.read_csv(csv_file)
-        log(f"Loaded {len(df)} entries from {csv_file}", "success")
+        df = pd.read_csv(csv_file, skiprows=skip_lines)
+        log(f"Loaded {len(df)} entries from {csv_file} (skipped {skip_lines} lines)", "success")
 
         # Extract domains
         domains = []
-        # Check for columns with and without trailing spaces
-        if "id" in df.columns:
+        # Always use the second column (index 1) which should contain domains
+        # This handles both with and without headers correctly
+        if len(df.columns) >= 2:
+            domains = df.iloc[:, 1].tolist()  # Always use the second column for domains
+        # Fallback options if second column doesn't exist
+        elif "id" in df.columns:
             domains = df["id"].tolist()
         elif "id " in df.columns:
             domains = df["id "].tolist()
@@ -372,11 +377,8 @@ def process_domains(
             domains = df["domain"].tolist()
         elif "domain " in df.columns:
             domains = df["domain "].tolist()
-        elif len(df.columns) >= 2:
-            col_name = df.columns[1]
-            domains = df[col_name].tolist()
         else:
-            domains = df.iloc[:, 0].tolist()
+            domains = df.iloc[:, 0].tolist()  # Last resort: use first column
 
         # Filter valid domains and strip any trailing spaces
         domains = [d.strip() if isinstance(d, str) else d for d in domains]
