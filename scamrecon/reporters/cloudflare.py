@@ -6,8 +6,10 @@ For reporting large numbers of phishing domains.
 import csv
 import json
 import os
+import pickle
 import random
 import time
+from pathlib import Path
 from typing import Dict, List, Optional
 
 import undetected_chromedriver as uc
@@ -29,6 +31,7 @@ class CloudflareReporter:
         timeout: int = 20,
         headless: bool = False,  # Setting to False to help with debugging
         batch_size: int = 50,  # Number of domains to process (each as an individual report)
+        cookie_file: str = None,  # Path to save/load cookies
     ):
         """
         Initialize the reporter.
@@ -38,18 +41,28 @@ class CloudflareReporter:
             timeout: Page load timeout in seconds
             headless: Whether to run browser in headless mode
             batch_size: Number of domains to process in a batch (each as an individual report)
+            cookie_file: Path to save/load cookies (to maintain session between runs)
         """
         self.output_dir = output_dir
         self.timeout = timeout
         self.headless = headless
         self.batch_size = batch_size
         self.cloudflare_url = "https://abuse.cloudflare.com/phishing"
+        self.cookie_file = cookie_file or os.path.join(
+            output_dir, "cloudflare_cookies.pkl"
+        )
 
         # Create output directory
         os.makedirs(output_dir, exist_ok=True)
 
         # Report counter for logging
         self.report_counter = 0
+
+        # Session tokens (saved after successful form submission)
+        self.session_tokens = {}
+
+        # Flag to track if captcha was bypassed in previous submissions
+        self.previously_bypassed_captcha = False
 
         # Setup driver
         self.setup_driver()
@@ -65,16 +78,42 @@ class CloudflareReporter:
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--window-size=1920,1080")
 
-        # User agent to appear more like a regular browser
-        options.add_argument(
-            "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
+        # Advanced bot detection bypass options
+        options.add_argument("--disable-blink-features=AutomationControlled")
+
+        # Random user agent to appear more like a regular browser
+        user_agents = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36 Edg/121.0.0.0",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/113.0",
+        ]
+        import random
+
+        options.add_argument(f"user-agent={random.choice(user_agents)}")
 
         self.driver = uc.Chrome(options=options)
         self.driver.set_page_load_timeout(self.timeout)
 
+        # Execute stealth JS to make detection harder
+        self.driver.execute_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        )
+
+        # Add additional cookies and browser fingerprinting that appears more human-like
+        self.driver.execute_cdp_cmd(
+            "Network.setUserAgentOverride",
+            {
+                "userAgent": self.driver.execute_script("return navigator.userAgent"),
+                "platform": "Windows",
+            },
+        )
+
         # Wait setup
         self.wait = WebDriverWait(self.driver, 10)
+
+        # Try to load saved cookies
+        self.load_cookies()
 
     def report_domain(self, domain: str, report_data: Dict) -> Dict:
         """
@@ -288,13 +327,107 @@ class CloudflareReporter:
                 result["error"] = f"Failed at checkbox selection: {str(e)}"
                 return result
 
-            # At this point, wait for the human to solve the captcha
-            print("=" * 80)
-            print(
-                f"HUMAN INTERVENTION REQUIRED - Please solve the captcha in the browser window"
-            )
-            print(f"Report #{result['report_number']} - Reporting domain: {domain}")
-            print("=" * 80)
+            # First try to detect if there's a turnstile widget
+            print("Checking for Cloudflare Turnstile widget...")
+            turnstile_frame = None
+            human_intervention_needed = False
+
+            # Look for Turnstile iframe
+            try:
+                # Use XPath to find Cloudflare Turnstile iframe
+                iframe_xpath = "//iframe[contains(@src, 'challenges.cloudflare.com')]"
+                turnstile_frames = self.driver.find_elements(By.XPATH, iframe_xpath)
+
+                if turnstile_frames:
+                    turnstile_frame = turnstile_frames[
+                        0
+                    ]  # Assume the first one is the challenge
+
+                if turnstile_frame:
+                    print("✓ Turnstile widget detected. Attempting automated bypass...")
+
+                    # Switch to the Turnstile iframe
+                    self.driver.switch_to.frame(turnstile_frame)
+
+                    # Wait for challenge to load
+                    time.sleep(2)
+
+                    # Look for challenge elements
+                    try:
+                        challenge_element = self.driver.find_element(
+                            By.CSS_SELECTOR, "div.challenge"
+                        )
+                        self.driver.execute_script(
+                            "arguments[0].click();", challenge_element
+                        )
+                        print("✓ Clicked Turnstile challenge element")
+                    except Exception:
+                        try:
+                            checkbox = self.driver.find_element(
+                                By.CSS_SELECTOR, "span.mark"
+                            )
+                            self.driver.execute_script(
+                                "arguments[0].click();", checkbox
+                            )
+                            print("✓ Clicked Turnstile checkbox element")
+                        except Exception:
+                            print(
+                                "⨯ Unable to find clickable elements in Turnstile. Trying alternative methods."
+                            )
+
+                    # Return to main frame
+                    self.driver.switch_to.default_content()
+
+                    # Alternative Method 1: Tab-based navigation and Enter key
+                    try:
+                        body = self.driver.find_element(By.TAG_NAME, "body")
+
+                        for _ in range(5):  # Try navigating to the challenge
+                            body.send_keys(Keys.TAB)
+                            time.sleep(0.5)
+
+                        body.send_keys(Keys.ENTER)
+                        print("✓ Sent TAB navigation and ENTER key")
+                        time.sleep(2)
+                    except Exception as e:
+                        print(f"⨯ Tab navigation error: {e}")
+
+                    # Wait a bit to see if bypass worked
+                    time.sleep(5)
+
+                    # Check if the submit button is enabled
+                    try:
+                        submit_button = self.driver.find_element(
+                            By.CSS_SELECTOR, "button[type='submit']"
+                        )
+                        if not submit_button.get_attribute("disabled"):
+                            print("✓ Bypass successful! Submit button is enabled.")
+                            human_intervention_needed = False
+                        else:
+                            print(
+                                "⨯ Automated bypass failed. Human intervention required."
+                            )
+                            human_intervention_needed = True
+                    except Exception:
+                        print("⨯ Could not check submit button status.")
+                        human_intervention_needed = True
+
+                else:
+                    print("⨯ No Turnstile widget detected. Proceeding with submission.")
+                    human_intervention_needed = False
+
+            except Exception as e:
+                print(f"Error checking for turnstile: {e}")
+                human_intervention_needed = True
+
+            # If human intervention is needed, prompt the user
+            if human_intervention_needed:
+                print("=" * 80)
+                print(
+                    f"HUMAN INTERVENTION REQUIRED - Please solve the captcha in the browser window"
+                )
+                print(f"Report #{result['report_number']} - Reporting domain: {domain}")
+                print("=" * 80)
 
             # Wait for the captcha to be solved (submit button becomes enabled)
             max_wait_time = 300  # 5 minutes to solve the captcha
@@ -310,7 +443,7 @@ class CloudflareReporter:
                     )
                     if not submit_button.get_attribute("disabled"):
                         # Button is enabled, captcha has been solved
-                        print("Captcha appears to be solved, submitting form...")
+                        print("Submit button is enabled, proceeding with submission...")
 
                         # Click the submit button
                         self.driver.execute_script(
@@ -329,6 +462,13 @@ class CloudflareReporter:
                             print(
                                 f"✓ Report #{result['report_number']} for {domain} submitted successfully!"
                             )
+
+                            # Save cookies after successful submission
+                            self.save_cookies()
+
+                            # If we got here and previously bypassed the captcha, set the flag
+                            if not human_intervention_needed:
+                                self.previously_bypassed_captcha = True
                         else:
                             result["error"] = (
                                 "Form submitted but no confirmation detected"
@@ -344,14 +484,16 @@ class CloudflareReporter:
                 # Wait a bit before checking again
                 time.sleep(step)
                 wait_time += step
-                if wait_time % 30 == 0:  # Reminder every 30 seconds
+                if (
+                    human_intervention_needed and wait_time % 30 == 0
+                ):  # Reminder every 30 seconds
                     print(
                         f"Still waiting for captcha solution... ({wait_time} seconds elapsed)"
                     )
 
             if wait_time >= max_wait_time:
-                result["error"] = "Timed out waiting for captcha solution"
-                print("⨯ Timed out waiting for captcha to be solved")
+                result["error"] = "Timed out waiting for form submission"
+                print("⨯ Timed out waiting for form to be submitted")
 
             # Ensure we don't move to the next domain until this one completes
             if not result["success"] and not result["error"]:
@@ -370,9 +512,77 @@ class CloudflareReporter:
             print(f"⨯ Error submitting report for {domain}: {result['error']}")
             return result
 
+    def save_cookies(self):
+        """Save cookies to file for reuse in future sessions"""
+        try:
+            cookies = self.driver.get_cookies()
+            local_storage = self.driver.execute_script(
+                "return Object.keys(localStorage)"
+            )
+            local_storage_dict = {}
+
+            # Get all local storage items
+            for key in local_storage:
+                value = self.driver.execute_script(
+                    f"return localStorage.getItem('{key}')"
+                )
+                local_storage_dict[key] = value
+
+            # Save both cookies and local storage
+            data_to_save = {
+                "cookies": cookies,
+                "local_storage": local_storage_dict,
+                "session_tokens": self.session_tokens,
+            }
+
+            with open(self.cookie_file, "wb") as f:
+                pickle.dump(data_to_save, f)
+            print(f"Session data saved to {self.cookie_file}")
+        except Exception as e:
+            print(f"Error saving cookies: {e}")
+
+    def load_cookies(self):
+        """Load cookies from file if exists"""
+        try:
+            if os.path.exists(self.cookie_file):
+                # First visit cloudflare domain to set cookies for that domain
+                self.driver.get(self.cloudflare_url)
+                time.sleep(2)
+
+                with open(self.cookie_file, "rb") as f:
+                    data = pickle.load(f)
+
+                # Restore cookies
+                for cookie in data.get("cookies", []):
+                    # Some cookies can't be loaded if they've expired
+                    try:
+                        self.driver.add_cookie(cookie)
+                    except Exception:
+                        pass
+
+                # Restore local storage
+                for key, value in data.get("local_storage", {}).items():
+                    self.driver.execute_script(
+                        f"localStorage.setItem('{key}', '{value}')"
+                    )
+
+                # Restore session tokens
+                self.session_tokens = data.get("session_tokens", {})
+
+                # Refresh the page to apply cookies
+                self.driver.refresh()
+                print("Previous session data loaded successfully")
+                return True
+        except Exception as e:
+            print(f"Error loading cookies: {e}")
+        return False
+
     def close(self):
         """Close browser when done"""
         try:
+            # Save cookies before closing
+            self.save_cookies()
+
             if hasattr(self, "driver") and self.driver:
                 self.driver.quit()
                 print("Browser closed successfully")
@@ -429,6 +639,7 @@ def batch_submit_reports(
     headless: bool = False,
     timeout: int = 20,
     skip_lines: int = 0,
+    cookie_file: str = None,
 ) -> None:
     """
     Submit individual reports for each domain in sequence.
@@ -477,7 +688,10 @@ Evidence of phishing:
 
         # Initialize reporter
         reporter = CloudflareReporter(
-            batch_size=batch_size, headless=headless, timeout=timeout
+            batch_size=batch_size,
+            headless=headless,
+            timeout=timeout,
+            cookie_file=cookie_file,
         )
 
         all_results = []

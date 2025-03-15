@@ -39,6 +39,10 @@ def main():
     parser.add_argument(
         "--timeout", type=int, default=20, help="Timeout for page loads in seconds"
     )
+    parser.add_argument(
+        "--cookie-file", help="File to store session cookies for reuse (helps avoid captchas)",
+        default="cloudflare_cookies.pkl"
+    )
     args = parser.parse_args()
 
     # Load report fields from JSON file
@@ -60,6 +64,7 @@ def main():
         batch_size=args.batch_size,
         headless=args.headless,
         timeout=args.timeout,
+        cookie_file=args.cookie_file,
     )
 
     return 0

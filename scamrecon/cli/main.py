@@ -241,6 +241,9 @@ def report():
 @click.option(
     "--skip", help="Number of lines to skip from the CSV file", default=0, type=int
 )
+@click.option(
+    "--cookie-file", help="File to store session cookies for reuse (helps avoid captchas)", type=click.Path()
+)
 def report_to_cloudflare(
     csv_file: str,
     output: str = "report_results.json",
@@ -249,6 +252,7 @@ def report_to_cloudflare(
     timeout: int = 20,
     headless: bool = False,
     skip: int = 0,
+    cookie_file: Optional[str] = None,
 ):
     """Report phishing domains to Cloudflare's abuse portal. Each domain is submitted as a separate report."""
     print_header("CLOUDFLARE ABUSE REPORTING")
@@ -305,6 +309,7 @@ def report_to_cloudflare(
         headless=headless,
         timeout=timeout,
         skip_lines=skip,
+        cookie_file=cookie_file,
     )
 
 
