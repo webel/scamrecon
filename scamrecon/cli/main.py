@@ -2,16 +2,18 @@
 Command-line interface for ScamRecon.
 """
 
+import json
 import os
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import click
 from rich.console import Console
 
 from scamrecon.analyzers.screenshot import ScreenshotCapture, batch_capture_screenshots
 from scamrecon.analyzers.tech_detector import TechDetector, process_domains
-from scamrecon.core.domain_investigator import DomainInvestigator
+from scamrecon.core.domain_investigator import DomainInvestigator, batch_investigate_domains
+from scamrecon.reporters.cloudflare import batch_submit_reports
 from scamrecon.utils.config import Config
 from scamrecon.utils.console import log, print_header
 from scamrecon.utils.helpers import normalize_domain
@@ -179,11 +181,15 @@ def batch():
 @click.option(
     "--timeout", "-t", help="Timeout for requests in seconds", default=20, type=int
 )
+@click.option(
+    "--skip", help="Number of lines to skip from the CSV file", default=0, type=int
+)
 def batch_process(
     csv_file: str,
     output: str = "results",
     mode: str = "tech",
     timeout: int = 20,
+    skip: int = 0,
 ):
     """Process multiple domains from a CSV file."""
     if not os.path.exists(csv_file):
@@ -195,17 +201,111 @@ def batch_process(
 
     if mode == "tech":
         print_header("BATCH TECHNOLOGY DETECTION")
-        process_domains(csv_file, output_dir=output, timeout=timeout)
+        process_domains(csv_file, output_dir=output, timeout=timeout, skip_lines=skip)
 
     elif mode == "screenshot":
         print_header("BATCH SCREENSHOT CAPTURE")
-        batch_capture_screenshots(csv_file, output_dir=output)
+        batch_capture_screenshots(csv_file, output_dir=output, skip_lines=skip)
 
     elif mode == "investigate":
         print_header("BATCH DOMAIN INVESTIGATION")
-        click.echo(
-            "Not implemented yet. Use domain investigate command for individual domains."
-        )
+        batch_investigate_domains(csv_file, output_dir=output, timeout=timeout, skip_lines=skip)
+
+
+@cli.group()
+def report():
+    """Commands for reporting malicious domains."""
+    pass
+
+
+@report.command("cloudflare")
+@click.argument("csv_file", type=click.Path(exists=True))
+@click.option(
+    "--output", "-o", help="Output JSON file for results", default="report_results.json", type=click.Path()
+)
+@click.option(
+    "--report-fields", help="JSON file with report field data", type=click.Path(exists=True)
+)
+@click.option(
+    "--batch-size",
+    type=int,
+    default=50,
+    help="Number of domains to process (each domain is submitted as a separate report)",
+)
+@click.option(
+    "--timeout", "-t", help="Timeout for page loads in seconds", default=20, type=int
+)
+@click.option(
+    "--headless/--no-headless", default=False, help="Run browser in headless mode"
+)
+@click.option(
+    "--skip", help="Number of lines to skip from the CSV file", default=0, type=int
+)
+def report_to_cloudflare(
+    csv_file: str,
+    output: str = "report_results.json",
+    report_fields: Optional[str] = None,
+    batch_size: int = 50,
+    timeout: int = 20,
+    headless: bool = False,
+    skip: int = 0,
+):
+    """Report phishing domains to Cloudflare's abuse portal. Each domain is submitted as a separate report."""
+    print_header("CLOUDFLARE ABUSE REPORTING")
+
+    if not os.path.exists(csv_file):
+        click.echo(f"Error: CSV file not found: {csv_file}")
+        return
+
+    # Initialize report_data
+    report_data = {}
+    
+    # Load report fields from JSON file if provided
+    if report_fields:
+        try:
+            with open(report_fields, 'r') as f:
+                report_data = json.load(f)
+            click.echo(f"Loaded report information from {report_fields}")
+        except Exception as e:
+            click.echo(f"Error loading report fields from {report_fields}: {e}")
+            return
+    else:
+        # Get report information from user
+        click.echo("Please provide the following information for your reports:")
+
+        report_data = {
+            "name": click.prompt("Your name"),
+            "email": click.prompt("Your email"),
+            "title": click.prompt("Your title", default="", show_default=False),
+            "company": click.prompt("Company name", default="", show_default=False),
+            "telephone": click.prompt("Phone number", default="", show_default=False),
+            "justification": click.prompt(
+                "Justification/evidence (detailed description of the phishing activity)"
+            ),
+            "targeted_brand": click.prompt("Targeted brand URL or description"),
+            "comments": click.prompt("Additional comments", default="", show_default=False),
+            "include_contact_info": click.confirm(
+                "Include your contact info with forwarded reports?", default=True
+            ),
+        }
+
+        # Remove empty fields
+        report_data = {k: v for k, v in report_data.items() if v}
+
+    # Output directory for reports
+    report_dir = os.path.dirname(output)
+    if report_dir and not os.path.exists(report_dir):
+        os.makedirs(report_dir, exist_ok=True)
+
+    batch_submit_reports(
+        domains_file=csv_file,
+        output_file=output,
+        report_data=report_data,
+        batch_size=batch_size,
+        headless=headless,
+        timeout=timeout,
+        skip_lines=skip,
+    )
 
 
 @cli.command("version")

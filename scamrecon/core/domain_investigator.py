@@ -3,7 +3,6 @@ Core domain investigation functionality for gathering information about domains.
 """
 
 import json
-import os
 import re
 import socket
 import ssl
@@ -1388,3 +1387,140 @@ class DomainInvestigator:
 
         return self.results
 
+
+def batch_investigate_domains(
+    csv_file: str,
+    output_dir: str = "investigation_results",
+    timeout: int = 10,
+    skip_lines: int = 0,
+) -> None:
+    """
+    Investigate multiple domains from a CSV file.
+
+    Args:
+        csv_file: Path to CSV file with domains
+        output_dir: Directory to save results
+        timeout: Timeout for requests in seconds
+        skip_lines: Number of lines to skip from the CSV file
+    """
+    import os
+
+    import pandas as pd
+
+    from scamrecon.utils.config import Config
+    from scamrecon.utils.console import log, print_header
+
+    # Create output directory
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Load domains
+    try:
+        df = pd.read_csv(csv_file, skiprows=skip_lines)
+        log(
+            f"Loaded {len(df)} entries from {csv_file} (skipped {skip_lines} lines)",
+            "success",
+        )
+
+        # Extract domains
+        domains = []
+        # Always use the second column (index 1) which should contain domains
+        # This handles both with and without headers correctly
+        if len(df.columns) >= 2:
+            domains = df.iloc[:, 1].tolist()  # Always use the second column for domains
+        # Fallback options if second column doesn't exist
+        elif "id" in df.columns:
+            domains = df["id"].tolist()
+        elif "id " in df.columns:
+            domains = df["id "].tolist()
+        elif "domain" in df.columns:
+            domains = df["domain"].tolist()
+        elif "domain " in df.columns:
+            domains = df["domain "].tolist()
+        else:
+            domains = df.iloc[:, 0].tolist()  # Last resort: use first column
+
+        # Filter valid domains and strip any trailing spaces
+        domains = [d.strip() if isinstance(d, str) else d for d in domains]
+        domains = [d for d in domains if isinstance(d, str)]
+        log(f"Found {len(domains)} domains to investigate", "info")
+
+        # Setup config
+        config = Config.load_default()
+        config.timeout = timeout
+        config.scan_malware = True
+
+        # Investigate each domain
+        all_results = []
+
+        for i, domain in enumerate(domains):
+            log(f"Processing domain {i+1}/{len(domains)}: {domain}", "info")
+
+            # Generate output file path
+            output_file = f"{output_dir}/{domain}_investigation.json"
+
+            # Run investigation
+            investigator = DomainInvestigator(domain, config, output_file=output_file)
+            result = investigator.run_investigation()
+            all_results.append(result)
+
+            # Create summary every 5 domains or at the end
+            if (i + 1) % 5 == 0 or i == len(domains) - 1:
+                create_investigation_summary(all_results, output_dir)
+                log(f"Processed {i+1}/{len(domains)} domains", "info")
+
+        log("\nInvestigation completed.", "success")
+        log(f"Results saved to {output_dir}/", "success")
+
+    except Exception as e:
+        log(f"Error processing file: {str(e)}", "error")
+
+
+def create_investigation_summary(results, output_dir):
+    """
+    Create summary CSV of all investigation results.
+
+    Args:
+        results: List of investigation results
+        output_dir: Directory to save summary
+    """
+    import pandas as pd
+
+    rows = []
+
+    for r in results:
+        row = {
+            "domain": r.get("domain", ""),
+            "scan_time": r.get("scan_time", ""),
+            "is_cloudflare_protected": r.get("is_cloudflare_protected", False),
+        }
+
+        # Add origin information
+        origins = r.get("confirmed_origins", [])
+        if origins:
+            row["origin_ips"] = ", ".join([o.get("ip", "") for o in origins])
+        else:
+            row["origin_ips"] = ""
+
+        # Add security issues
+        issues = r.get("security_issues", [])
+        high_issues = [i for i in issues if i.get("severity") == "High"]
+        medium_issues = [i for i in issues if i.get("severity") == "Medium"]
+
+        row["high_severity_issues"] = len(high_issues)
+        row["medium_severity_issues"] = len(medium_issues)
+        row["total_issues"] = len(issues)
+
+        # Add detected technologies
+        if "technology_stack" in r:
+            row["technologies"] = ", ".join(r.get("technology_stack", []))
+
+        # Add WHOIS information
+        whois = r.get("whois_info", {})
+        row["registrar"] = whois.get("registrar", "")
+        row["creation_date"] = whois.get("creation_date", "")
+
+        rows.append(row)
+
+    # Create DataFrame and save
+    df = pd.DataFrame(rows)
+    df.to_csv(f"{output_dir}/summary.csv", index=False)
