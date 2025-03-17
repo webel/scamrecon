@@ -28,7 +28,8 @@ dependencies = [
 ]
 
 [project.scripts]
-scamrecon = "scamrecon.cli.main:cli"
+scamrecon = "scamrecon.cli.main_refactored:cli"
+scamrecon-legacy = "scamrecon.cli.main:cli"
 
 [project.optional-dependencies]
 dev = [

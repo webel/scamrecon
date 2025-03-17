@@ -41,7 +41,22 @@ scamrecon batch process domains.csv --output results/
 
 # Take screenshots of websites
 scamrecon screenshot capture example.com
+
+# Take full-page screenshots (new feature)
+scamrecon screenshot capture example.com --fullpage
 ```
+
+### Enhanced Features
+
+The latest version includes improved functionality with:
+
+- Better error handling and reporting
+- Consistent performance metrics
+- Enhanced screenshot capture with full-page option
+- More reliable technology detection
+- Improved security analysis
+
+See [USAGE.md](USAGE.md) for comprehensive examples and [REFACTORING.md](REFACTORING.md) for details on the new architecture.
 
 ## Configuration
 
