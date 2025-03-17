@@ -21,6 +21,10 @@ dependencies = [
     "colorama>=0.4.4",
     "rich>=12.0.0",
     "setuptools>=75.3.2",
+    "flask>=3.0.3",
+    "opencv-python>=4.11.0.86",
+    "pillow>=10.4.0",
+    "scikit-image>=0.21.0",
 ]
 
 [project.scripts]

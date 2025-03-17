@@ -4,11 +4,12 @@ Fixed for compatibility with all undetected_chromedriver versions.
 """
 
 import json
+import logging
 import os
 import pickle
 import random
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import undetected_chromedriver as uc
 from selenium.common.exceptions import StaleElementReferenceException, TimeoutException
@@ -16,6 +17,9 @@ from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
+
+# Import the TurnstileClient
+from scamrecon.reporters.utils.turnstile_client import TurnstileClient
 
 
 class CloudflareReporter:
@@ -30,6 +34,10 @@ class CloudflareReporter:
         headless: bool = False,
         batch_size: int = 50,
         cookie_file: Optional[str] = None,
+        turnstile_api_url: str = "http://127.0.0.1:5000",
+        use_turnstile_api: bool = True,
+        use_shared_browser: bool = True,
+        evidence_dir: Optional[str] = None,
     ):
         """
         Initialize the reporter with improved settings.
@@ -40,6 +48,10 @@ class CloudflareReporter:
             headless: Whether to run browser in headless mode
             batch_size: Number of domains to process (each as an individual report)
             cookie_file: Path to cookie file for persistent sessions
+            turnstile_api_url: URL of the Turnstile Solver API
+            use_turnstile_api: Whether to use the Turnstile Solver API
+            use_shared_browser: Whether to share a browser instance with the turnstile API
+            evidence_dir: Directory containing investigation evidence files
         """
         self.output_dir = output_dir
         self.timeout = timeout
@@ -48,15 +60,42 @@ class CloudflareReporter:
         self.cloudflare_url = "https://abuse.cloudflare.com/phishing"
         self.cookie_file = cookie_file
         self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        self.turnstile_api_url = turnstile_api_url
+        self.use_turnstile_api = use_turnstile_api
+        self.use_shared_browser = use_shared_browser and use_turnstile_api
+        self.evidence_dir = evidence_dir
+
+        # Setup logging
+        self.logger = logging.getLogger("CloudflareReporter")
+
+        # Initialize Turnstile client if enabled
+        if self.use_turnstile_api:
+            self.turnstile_client = TurnstileClient(
+                api_url=turnstile_api_url, shared_browser=self.use_shared_browser
+            )
+            # Check if API is available
+            if not self.turnstile_client.is_api_available():
+                self.logger.warning(
+                    f"Turnstile API at {turnstile_api_url} is not available. "
+                    "Please start the API server with 'scamrecon api' or set use_turnstile_api=False."
+                )
+                self.use_turnstile_api = False
+                self.use_shared_browser = False
 
         # Create output directory
         os.makedirs(output_dir, exist_ok=True)
 
+        # Create evidence reports directory if specified
+        if self.evidence_dir:
+            os.makedirs(os.path.join(self.evidence_dir, "reports"), exist_ok=True)
+            self.logger.info(f"Evidence directory set to {self.evidence_dir}")
+
         # Report counter for logging
         self.report_counter = 0
 
-        # Setup driver with improved fingerprinting
-        self.setup_driver()
+        # Setup driver with improved fingerprinting - only if not using shared browser
+        if not self.use_shared_browser:
+            self.setup_driver()
 
     def setup_driver(self):
         """Set up Chrome webdriver with enhanced anti-detection measures"""
@@ -374,6 +413,7 @@ class CloudflareReporter:
     def handle_captcha(self, max_wait_time=600):
         """
         Handle Turnstile captcha with improved detection of completion.
+        If the Turnstile API is available, use it; otherwise, fallback to human solving.
 
         Args:
             max_wait_time: Maximum time to wait for human to solve captcha
@@ -381,6 +421,122 @@ class CloudflareReporter:
         Returns:
             True if captcha solved, False otherwise
         """
+        # First try to find the Turnstile sitekey on the page
+        try:
+            page_source = self.driver.page_source
+
+            # Check if we can find response fields with sitekey attribute
+            sitekey = None
+            response_fields = self.driver.find_elements(
+                By.CSS_SELECTOR,
+                ".cf-turnstile, [data-sitekey], [class*='turnstile'], [class*='cf-']",
+            )
+
+            for field in response_fields:
+                try:
+                    potential_sitekey = field.get_attribute("data-sitekey")
+                    if potential_sitekey and len(potential_sitekey) > 10:
+                        sitekey = potential_sitekey
+                        break
+                except:
+                    pass
+
+            # If we couldn't find it in elements, try regex on page source
+            if not sitekey and self.use_turnstile_api:
+                sitekey = self.turnstile_client.extract_sitekey(page_source)
+
+            # If we have a sitekey and the API is enabled, use it
+            if sitekey and self.use_turnstile_api:
+                self.logger.info(f"Found Turnstile sitekey: {sitekey}")
+                print("\n" + "=" * 80)
+                print(f"TURNSTILE DETECTED - Using API to solve")
+                print(f"Sitekey: {sitekey}")
+                print("=" * 80 + "\n")
+
+                # Get the current URL
+                current_url = self.driver.current_url
+
+                # Call the API to solve the turnstile
+                result = self.turnstile_client.solve(
+                    url=current_url, sitekey=sitekey, timeout=max_wait_time
+                )
+
+                if result["status"] == "success" and result["token"]:
+                    # We got a token, inject it into the page
+                    token = result["token"]
+                    self.logger.info(f"Injecting token: {token[:10]}...")
+
+                    # Create JavaScript to inject the token into all possible fields
+                    inject_js = f"""
+                    (function() {{
+                        // Find all possible turnstile token fields and set their value
+                        const fieldSelectors = [
+                            'input[name="cf-turnstile-response"]',
+                            'input[name="g-recaptcha-response"]',
+                            'input[name="cf_challenge_response"]',
+                            '[data-cf-response]',
+                            '[data-cf-turnstile-response]'
+                        ];
+                        
+                        let injected = false;
+                        fieldSelectors.forEach(selector => {{
+                            const fields = document.querySelectorAll(selector);
+                            fields.forEach(field => {{
+                                field.value = "{token}";
+                                injected = true;
+                                console.log("Injected Turnstile token into field", field);
+                            }});
+                        }});
+                        
+                        // Set to window and document variables as fallback
+                        window.turnstileToken = "{token}";
+                        document.turnstileToken = "{token}";
+                        
+                        // Store in multiple places for redundancy
+                        if (typeof turnstile !== 'undefined') {{
+                            if (typeof turnstile.execute === 'function') {{
+                                try {{
+                                    turnstile.execute = function() {{ return "{token}"; }};
+                                }} catch(e) {{}}
+                            }}
+                        }}
+                        
+                        // Enable submit button if it was disabled
+                        const submitButtons = document.querySelectorAll('button[type="submit"], input[type="submit"]');
+                        submitButtons.forEach(button => {{
+                            if (button.hasAttribute('disabled')) {{
+                                button.removeAttribute('disabled');
+                                injected = true;
+                                console.log("Enabled submit button", button);
+                            }}
+                        }});
+                        
+                        return injected;
+                    }})();
+                    """
+
+                    # Execute the JavaScript
+                    injected = self.driver.execute_script(inject_js)
+
+                    if injected:
+                        print("✓ Successfully injected Turnstile token")
+                        # Give a brief pause for the page to process the token
+                        time.sleep(2)
+                        return True
+                    else:
+                        print(
+                            "⚠ Failed to find fields to inject token, falling back to human solving"
+                        )
+                else:
+                    error_msg = result.get("message", "Unknown error")
+                    print(f"⚠ API failed to solve Turnstile: {error_msg}")
+                    print("Falling back to human solving...")
+        except Exception as e:
+            self.logger.error(f"Error using Turnstile API: {str(e)}")
+            print(f"⚠ Error using Turnstile API: {str(e)}")
+            print("Falling back to human solving...")
+
+        # Fallback to human solving
         print("\n" + "=" * 80)
         print("HUMAN CAPTCHA REQUIRED - Please solve the captcha in the browser window")
         print("Take your time - you have 10 minutes before timeout")
@@ -391,6 +547,12 @@ class CloudflareReporter:
 
         # Check if submit button becomes enabled or if response field gets populated
         def is_captcha_solved():
+            # First, check if user clicked submit button, such that the fields are cleared
+            form_fields = self.get_form_fields()
+            if form_fields:
+                # check if the name field is empty (indicating the form was reset)
+                if "name" in form_fields and not form_fields["name"]:
+                    return True
             try:
                 # Primary check: submit button enabled
                 submit_button = self.driver.find_element(
@@ -435,6 +597,37 @@ class CloudflareReporter:
             max_wait=max_wait_time,
             message="Waiting for human to solve captcha",
         )
+
+    def get_form_fields(self) -> Dict:
+        """
+        Extract all form fields from the Cloudflare abuse report form.
+
+        Returns:
+            Dictionary of form field names as type and values as value ({ email: example@gmail.com })
+        """
+        form_fields = {}
+
+        try:
+            # Find all input fields
+            input_fields = self.driver.find_elements(By.CSS_SELECTOR, "input")
+            for field in input_fields:
+                field_name = field.get_attribute("name")
+                field_value = field.get_attribute("value")
+                if field_name and field_value:
+                    form_fields[field_name] = field_value
+
+            # Find all textarea fields
+            textarea_fields = self.driver.find_elements(By.CSS_SELECTOR, "textarea")
+            for field in textarea_fields:
+                field_name = field.get_attribute("name")
+                field_value = field.get_attribute("value")
+                if field_name and field_value:
+                    form_fields[field_name] = field_value
+
+            return form_fields
+        except Exception as e:
+            print(f"Error getting form fields: {e}")
+            return form_fields
 
     def fill_form_field(self, selector, value, clear_first=True):
         """
@@ -501,6 +694,10 @@ class CloudflareReporter:
             print(f"\n{'='*60}")
             print(f"Processing report #{result['report_number']} for domain: {domain}")
             print(f"{'='*60}")
+
+            # Make sure we have a driver instance (could be using shared browser)
+            if not hasattr(self, "driver") or self.driver is None:
+                self.setup_driver()
 
             # Visit a neutral site first to initialize browser state
             self.driver.get("https://example.org")

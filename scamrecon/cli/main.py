@@ -20,6 +20,19 @@ from scamrecon.core.domain_investigator import (
 
 # Import the improved CloudflareReporter instead of the old batch_submit_reports
 from scamrecon.reporters.cloudflare import CloudflareReporter
+# Import functions from create_evidence
+from scamrecon.reporters.create_evidence import (
+    generate_abuse_report,
+    generate_cloudflare_report,
+    load_investigation_files,
+)
+# Import campaign analysis and screenshot similarity
+from scamrecon.reporters.scam_campaign_analysis import analyze_scam_campaign
+from scamrecon.reporters.screenshot_similarity import (
+    ScreenshotAnalyzer,
+    enhance_reports_with_screenshot_analysis,
+    analyze_novelty_patterns,
+)
 from scamrecon.utils.config import Config
 from scamrecon.utils.console import log, print_header
 from scamrecon.utils.helpers import normalize_domain
@@ -222,7 +235,7 @@ def batch_process(
         )
 
 
-# Modified function to use our improved CloudflareReporter
+# Modified function to use our improved CloudflareReporter with Turnstile API support and evidence
 def batch_submit_reports(
     domains_file: str,
     output_file: str = "report_results.json",
@@ -232,9 +245,29 @@ def batch_submit_reports(
     timeout: int = 20,
     skip_lines: int = 0,
     cookie_file: Optional[str] = None,
+    turnstile_api_url: str = "http://127.0.0.1:5000",
+    use_turnstile_api: bool = True,
+    evidence_dir: Optional[str] = None,
+    all_investigations: List[Dict] = None,
+    use_evidence: bool = False,
 ) -> None:
     """
     Submit individual reports for each domain using our improved CloudflareReporter.
+    
+    Args:
+        domains_file: File containing domains to report (CSV or TXT)
+        output_file: File to save results to
+        report_data: Dictionary containing report information
+        batch_size: Number of domains to process in a batch
+        headless: Whether to run browser in headless mode
+        timeout: Page load timeout in seconds
+        skip_lines: Number of lines to skip from the input file
+        cookie_file: File to store/load session cookies
+        turnstile_api_url: URL of the Turnstile Solver API
+        use_turnstile_api: Whether to use the Turnstile Solver API
+        evidence_dir: Directory containing investigation evidence files
+        all_investigations: List of investigation data dictionaries (if already loaded)
+        use_evidence: Whether to enhance reports with evidence data
     """
     try:
         # Local implementation of domain loading to avoid dependency issues
@@ -289,13 +322,47 @@ def batch_submit_reports(
         console.print(
             f"[bold]Each domain will be submitted as a separate report[/bold]"
         )
+        
+        # Check if Turnstile API is available
+        if use_turnstile_api:
+            from scamrecon.reporters.utils.turnstile_client import TurnstileClient
+            client = TurnstileClient(api_url=turnstile_api_url)
+            if not client.is_api_available():
+                console.print(
+                    f"[yellow]Warning: Turnstile API at {turnstile_api_url} is not available.[/yellow]"
+                )
+                console.print(
+                    f"[yellow]You can start it with 'scamrecon api'. Falling back to human captcha solving.[/yellow]"
+                )
+                use_turnstile_api = False
+            else:
+                console.print(
+                    f"[green]Using Turnstile API at {turnstile_api_url} for automated captcha solving[/green]"
+                )
+                console.print(
+                    f"[green]Using shared browser instance for better performance and stability[/green]"
+                )
 
-        # Initialize reporter
+        # Load investigation evidence if not already loaded
+        if use_evidence and evidence_dir and not all_investigations:
+            console.print(f"[bold]Loading investigation evidence from {evidence_dir}[/bold]")
+            all_investigations = load_investigation_files(evidence_dir)
+            console.print(f"[green]✓ Loaded {len(all_investigations)} investigation files[/green]")
+        
+        # Create evidence directory if it doesn't exist yet
+        if evidence_dir:
+            os.makedirs(os.path.join(evidence_dir, "reports"), exist_ok=True)
+
+        # Initialize reporter with Turnstile API support, shared browser, and evidence directory
         reporter = CloudflareReporter(
             batch_size=batch_size,
             headless=headless,
             timeout=timeout,
             cookie_file=cookie_file,
+            turnstile_api_url=turnstile_api_url,
+            use_turnstile_api=use_turnstile_api,
+            use_shared_browser=True,
+            evidence_dir=evidence_dir,
         )
 
         all_results = []
@@ -307,8 +374,29 @@ def batch_submit_reports(
                     f"\n[cyan]Processing domain {i+1}/{len(domains)}: {domain}[/cyan]"
                 )
 
+                # Start with fields from report_fields.json as a base
+                domain_report_data = report_data.copy() if report_data else {}
+                
+                # If evidence is enabled, try to load the cloudflare report file directly
+                if use_evidence and evidence_dir:
+                    cloudflare_report_path = os.path.join(evidence_dir, f"{domain}_cloudflare_report.json")
+                    if os.path.exists(cloudflare_report_path):
+                        try:
+                            with open(cloudflare_report_path, "r") as f:
+                                cloudflare_report = json.load(f)
+                                console.print(f"[green]Found direct cloudflare report for {domain}[/green]")
+                                
+                                # Use the cloudflare report data directly - overriding field values
+                                domain_report_data = {**domain_report_data, **cloudflare_report}
+                        except Exception as e:
+                            console.print(f"[yellow]Error loading cloudflare report: {str(e)}[/yellow]")
+                    else:
+                        console.print(f"[yellow]No cloudflare report found for {domain} in {evidence_dir}[/yellow]")
+                        
+                        # No secondary fallback needed
+
                 # Submit report for this individual domain
-                result = reporter.report_domain(domain, report_data)
+                result = reporter.report_domain(domain, domain_report_data)
                 all_results.append(result)
 
                 # Save interim results
@@ -337,6 +425,69 @@ def batch_submit_reports(
 def report():
     """Commands for reporting malicious domains."""
     pass
+
+
+@report.command("evidence")
+@click.argument("investigation_dir", type=click.Path(exists=True))
+@click.option(
+    "--output-dir",
+    "-o",
+    help="Output directory for generated reports",
+    default="reports",
+    type=click.Path(),
+)
+def generate_evidence_reports(
+    investigation_dir: str,
+    output_dir: str = "reports"
+):
+    """Generate structured abuse reports from investigation data."""
+    print_header("EVIDENCE REPORT GENERATION")
+    
+    # Create output directory
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Load investigations
+    console.print(f"[bold]Loading investigations from {investigation_dir}...[/bold]")
+    all_investigations = load_investigation_files(investigation_dir)
+    console.print(f"[green]✓ Loaded {len(all_investigations)} domain investigations[/green]")
+    
+    if not all_investigations:
+        console.print("[red]Error: No investigation files found in the specified directory[/red]")
+        return
+    
+    # Check for screenshot analysis data
+    screenshot_analysis = None
+    screenshot_path = os.path.join(investigation_dir, "..", "screenshot_groups", "screenshot-analysis-report.json")
+    if os.path.exists(screenshot_path):
+        try:
+            with open(screenshot_path, "r") as f:
+                screenshot_analysis = json.load(f)
+            console.print(f"[green]Found screenshot analysis data with {screenshot_analysis.get('total_groups', 0)} visual similarity groups[/green]")
+        except Exception as e:
+            console.print(f"[yellow]Error loading screenshot analysis: {str(e)}[/yellow]")
+    
+    # Generate reports for each domain
+    for investigation in all_investigations:
+        domain = investigation.get("domain", "unknown")
+        console.print(f"\n[cyan]Generating reports for {domain}...[/cyan]")
+        
+        # Generate Cloudflare report with screenshot analysis if available
+        cloudflare_report = generate_cloudflare_report(investigation, all_investigations, screenshot_analysis)
+        
+        # Save the report
+        cloudflare_file = os.path.join(output_dir, f"{domain}_cloudflare_report.json")
+        with open(cloudflare_file, "w") as f:
+            json.dump(cloudflare_report, f, indent=2)
+            
+        # Check if this domain is part of a screenshot similarity group
+        if screenshot_analysis and cloudflare_report.get("technical_evidence", {}).get("visual_similarity"):
+            visual_data = cloudflare_report["technical_evidence"]["visual_similarity"]
+            if "screenshot_sim_dir" in visual_data:
+                console.print(f"[green]✓ Domain is part of screenshot similarity group {visual_data['group_id']} with evidence in {visual_data['screenshot_sim_dir']}[/green]")
+            
+        console.print(f"[green]✓ Saved Cloudflare report to {cloudflare_file}[/green]")
+    
+    console.print(f"\n[bold green]Successfully generated {len(all_investigations)} evidence reports[/bold green]")
 
 
 @report.command("cloudflare")
@@ -373,6 +524,26 @@ def report():
     help="File to store session cookies for reuse (helps avoid captchas)",
     type=click.Path(),
 )
+@click.option(
+    "--turnstile-api-url",
+    help="URL of the Turnstile Solver API",
+    default="http://127.0.0.1:5000",
+)
+@click.option(
+    "--use-turnstile-api/--no-turnstile-api",
+    help="Whether to use the Turnstile Solver API for automated captcha solving",
+    default=True,
+)
+@click.option(
+    "--evidence-dir",
+    help="Directory containing investigation evidence files",
+    type=click.Path(exists=True),
+)
+@click.option(
+    "--use-evidence/--no-evidence",
+    help="Whether to use evidence files to enhance report content",
+    default=False,
+)
 def report_to_cloudflare(
     csv_file: str,
     output: str = "report_results.json",
@@ -382,6 +553,10 @@ def report_to_cloudflare(
     headless: bool = False,
     skip: int = 0,
     cookie_file: Optional[str] = None,
+    turnstile_api_url: str = "http://127.0.0.1:5000",
+    use_turnstile_api: bool = True,
+    evidence_dir: Optional[str] = None,
+    use_evidence: bool = False,
 ):
     """Report phishing domains to Cloudflare's abuse portal. Each domain is submitted as a separate report."""
     print_header("CLOUDFLARE ABUSE REPORTING")
@@ -393,18 +568,28 @@ def report_to_cloudflare(
     # Initialize report_data
     report_data = {}
 
+    # Load evidence if specified
+    all_investigations = []
+    if use_evidence and evidence_dir:
+        console.print(f"[bold]Loading investigation evidence from {evidence_dir}[/bold]")
+        all_investigations = load_investigation_files(evidence_dir)
+        console.print(f"[green]✓ Loaded {len(all_investigations)} investigation files[/green]")
+        
+        if not all_investigations:
+            console.print("[yellow]Warning: No investigation files found. Will use manual report data.[/yellow]")
+
     # Load report fields from JSON file if provided
     if report_fields:
         try:
             with open(report_fields, "r") as f:
                 report_data = json.load(f)
-            click.echo(f"Loaded report information from {report_fields}")
+            console.print(f"[green]✓ Loaded report information from {report_fields}[/green]")
         except Exception as e:
-            click.echo(f"Error loading report fields from {report_fields}: {e}")
+            console.print(f"[red]Error loading report fields from {report_fields}: {e}[/red]")
             return
     else:
         # Get report information from user
-        click.echo("Please provide the following information for your reports:")
+        console.print("[bold]Please provide the following information for your reports:[/bold]")
 
         report_data = {
             "name": click.prompt("Your name"),
@@ -432,7 +617,7 @@ def report_to_cloudflare(
     if report_dir and not os.path.exists(report_dir):
         os.makedirs(report_dir, exist_ok=True)
 
-    # Use our improved function that uses CloudflareReporter
+    # Use our improved function that uses CloudflareReporter with Turnstile API support
     batch_submit_reports(
         domains_file=csv_file,
         output_file=output,
@@ -442,6 +627,11 @@ def report_to_cloudflare(
         timeout=timeout,
         skip_lines=skip,
         cookie_file=cookie_file,
+        turnstile_api_url=turnstile_api_url,
+        use_turnstile_api=use_turnstile_api,
+        evidence_dir=evidence_dir,
+        all_investigations=all_investigations,
+        use_evidence=use_evidence,
     )
 
 
@@ -509,6 +699,159 @@ def setup_cloudflare_profile(
         )
         for path in possible_paths:
             console.print(f"- {path}")
+
+
+@report.command("campaign-analysis")
+@click.argument("investigation_dir", type=click.Path(exists=True))
+@click.option(
+    "--screenshots",
+    "-s",
+    help="Directory containing screenshots",
+    required=True,
+    type=click.Path(exists=True),
+)
+@click.option(
+    "--output-dir",
+    "-o",
+    help="Output directory for analysis results",
+    default="campaign_analysis",
+    type=click.Path(),
+)
+def analyze_campaign(
+    investigation_dir: str,
+    screenshots: str,
+    output_dir: str = "campaign_analysis"
+):
+    """Analyze a campaign by combining domain data with screenshot similarity."""
+    print_header("SCAM CAMPAIGN ANALYSIS")
+    
+    # Create output directory
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Prepare options
+    options = {
+        "investigation_dir": investigation_dir,
+        "screenshot_dir": screenshots,
+        "output_dir": output_dir,
+        "reporter": {
+            "name": "Cookie",
+            "email": "slaymeacookie@gmail.com",
+            "title": "Security Analyst",
+            "company": "HackBack",
+        }
+    }
+    
+    # Run analysis
+    console.print(f"[bold]Starting campaign analysis...[/bold]")
+    console.print(f"[cyan]Loading investigation data from {investigation_dir}[/cyan]")
+    console.print(f"[cyan]Loading screenshots from {screenshots}[/cyan]")
+    
+    results = analyze_scam_campaign(options)
+    
+    # Print summary
+    console.print("\n[bold green]Campaign Analysis Summary:[/bold green]")
+    console.print(f"- Domains analyzed: {results['domains_analyzed']}")
+    console.print(f"- Infrastructure campaigns identified: {results['infrastructure_campaigns']}")
+    console.print(f"- Visual similarity groups: {results['visual_groups']}")
+    console.print(f"- Abuse reports generated: {results['reports_generated']}")
+    
+    console.print(f"\n[green]Results saved to: {output_dir}[/green]")
+    console.print(f"[green]Campaign summary: {output_dir}/campaign-summary.json[/green]")
+    console.print(f"[green]Enhanced reports: {output_dir}/reports/[/green]")
+    console.print(f"[green]Screenshot analysis: {output_dir}/screenshot-analysis/[/green]")
+
+
+@report.command("screenshot-similarity")
+@click.argument("screenshot_dir", type=click.Path(exists=True))
+@click.option(
+    "--output-dir",
+    "-o",
+    help="Output directory for analysis results",
+    default="similarity_analysis",
+    type=click.Path(),
+)
+@click.option(
+    "--investigations",
+    "-i",
+    help="Directory containing investigation JSON files (optional)",
+    type=click.Path(exists=True),
+)
+def analyze_screenshot_similarity(
+    screenshot_dir: str,
+    output_dir: str = "similarity_analysis",
+    investigations: Optional[str] = None
+):
+    """Analyze screenshots for visual similarity and group them."""
+    print_header("SCREENSHOT SIMILARITY ANALYSIS")
+    
+    # Create output directory
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Run analyzer
+    console.print(f"[bold]Analyzing screenshots in {screenshot_dir}...[/bold]")
+    analyzer = ScreenshotAnalyzer()
+    results = analyzer.run(screenshot_dir, output_dir)
+    
+    if "error" in results:
+        console.print(f"[red]Error: {results['error']}[/red]")
+        return
+    
+    # If investigations directory is provided, enhance reports
+    if investigations:
+        try:
+            console.print(f"[cyan]Loading investigation data from {investigations}...[/cyan]")
+            investigation_data = load_investigation_files(investigations)
+            console.print(f"[green]✓ Loaded {len(investigation_data)} investigation files[/green]")
+            
+            console.print("[cyan]Enhancing reports with screenshot analysis...[/cyan]")
+            enhanced_data = enhance_reports_with_screenshot_analysis(
+                screenshot_dir, 
+                os.path.join(output_dir, "enhanced"), 
+                investigation_data
+            )
+            
+            console.print("[cyan]Generating novelty analysis...[/cyan]")
+            novelty = analyze_novelty_patterns(investigation_data, enhanced_data)
+            with open(os.path.join(output_dir, "novelty-analysis.json"), "w") as f:
+                json.dump(novelty, f, indent=2)
+                
+            console.print(f"[green]✓ Enhanced analysis saved to {output_dir}/enhanced/[/green]")
+            console.print(f"[green]✓ Novelty analysis saved to {output_dir}/novelty-analysis.json[/green]")
+        except Exception as e:
+            console.print(f"[red]Error enhancing reports with investigation data: {str(e)}[/red]")
+    
+    # Print summary
+    console.print("\n[bold green]Screenshot Analysis Summary:[/bold green]")
+    console.print(f"- Screenshots analyzed: {results['total_screenshots']}")
+    console.print(f"- Visual similarity groups: {results['total_groups']}")
+    console.print(f"\n[green]Results saved to: {output_dir}[/green]")
+
+
+@cli.command("api")
+@click.option("--host", default="127.0.0.1", help="Host to bind to")
+@click.option("--port", type=int, default=5000, help="Port to listen on")
+@click.option("--output-dir", default="turnstile_data", help="Directory to store temporary files")
+def run_api(host: str = "127.0.0.1", port: int = 5000, output_dir: str = "turnstile_data"):
+    """
+    Run the Turnstile Solver API server.
+    
+    This API provides a standalone service for solving Cloudflare Turnstile challenges.
+    Start this server before running the 'report cloudflare' command with '--use-turnstile-api'.
+    """
+    print_header("TURNSTILE SOLVER API")
+    
+    # Create output directory
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Import here to avoid circular imports
+    from scamrecon.reporters.utils.turnstile_server import TurnstileSolverAPI
+    
+    console.print(f"[green]Starting Turnstile Solver API on {host}:{port}[/green]")
+    console.print("[cyan]Press Ctrl+C to stop the server[/cyan]")
+    
+    # Create and run API
+    api = TurnstileSolverAPI(host=host, port=port, output_dir=output_dir)
+    api.run()
 
 
 @cli.command("version")
