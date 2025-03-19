@@ -11,15 +11,29 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import click
+from dotenv import load_dotenv
 from rich.console import Console
 
+# Load environment variables from .env file
+load_dotenv()
+
 # Import refactored components
-from scamrecon.analyzers.screenshot_refactored import ScreenshotCapture, batch_capture_screenshots
+from scamrecon.analyzers.screenshot_refactored import (
+    ScreenshotCapture,
+    batch_capture_screenshots,
+)
 from scamrecon.analyzers.tech_detector_refactored import TechDetector, process_domains
-from scamrecon.reporters.cloudflare_refactored import CloudflareReporter, batch_submit_reports
+from scamrecon.core.domain_finder import get_domains_for_ip
 
 # Import the original components that haven't been refactored yet
-from scamrecon.core.domain_investigator import DomainInvestigator, batch_investigate_domains
+from scamrecon.core.domain_investigator import (
+    DomainInvestigator,
+    batch_investigate_domains,
+)
+from scamrecon.reporters.cloudflare_refactored import (
+    CloudflareReporter,
+    batch_submit_reports,
+)
 from scamrecon.reporters.create_evidence import (
     generate_abuse_report,
     generate_cloudflare_report,
@@ -28,13 +42,13 @@ from scamrecon.reporters.create_evidence import (
 from scamrecon.reporters.scam_campaign_analysis import analyze_scam_campaign
 from scamrecon.reporters.screenshot_similarity import (
     ScreenshotAnalyzer,
-    enhance_reports_with_screenshot_analysis,
     analyze_novelty_patterns,
+    enhance_reports_with_screenshot_analysis,
 )
 
 # Import utilities
 from scamrecon.utils.config import Config
-from scamrecon.utils.domain_utils import normalize_domain, load_domains_from_file
+from scamrecon.utils.domain_utils import load_domains_from_file, normalize_domain
 from scamrecon.utils.error_handler import ErrorHandler
 
 # Initialize console and error handler
@@ -46,16 +60,17 @@ log = error_handler.log
 @click.group()
 def cli():
     """ScamRecon - Tools for investigating potentially malicious websites.
-    
+
     This tool provides a comprehensive set of utilities for analyzing potentially
     malicious websites, detecting technologies, capturing screenshots, and submitting
     abuse reports. For detailed help on any command, use the --help option.
-    
+
     Examples:
       scamrecon domain investigate example.com
       scamrecon tech detect example.com
       scamrecon screenshot capture example.com --fullpage
       scamrecon batch process domains.csv --mode tech
+      scamrecon ip find-domains 93.184.216.34
     """
     pass
 
@@ -188,7 +203,10 @@ def screenshot():
     "--headless/--no-headless", default=True, help="Run browser in headless mode"
 )
 @click.option(
-    "--fullpage", is_flag=True, help="Capture full-page screenshot by scrolling", default=False
+    "--fullpage",
+    is_flag=True,
+    help="Capture full-page screenshot by scrolling",
+    default=False,
 )
 def capture_screenshot(
     domain_name: str,
@@ -283,25 +301,31 @@ def batch_process(
             log("BATCH TECHNOLOGY DETECTION", "info")
             # Use refactored process_domains function
             results = process_domains(
-                domains_file, 
-                output_dir=output, 
-                timeout=timeout, 
+                domains_file,
+                output_dir=output,
+                timeout=timeout,
                 skip_lines=skip,
-                headless=headless
+                headless=headless,
             )
-            log(f"Successfully processed {results['successful_detections']} domains", "success")
-            
+            log(
+                f"Successfully processed {results['successful_detections']} domains",
+                "success",
+            )
+
         elif mode == "screenshot":
             log("BATCH SCREENSHOT CAPTURE", "info")
             # Use refactored batch_capture_screenshots function
             results = batch_capture_screenshots(
-                domains_file, 
-                output_dir=output, 
+                domains_file,
+                output_dir=output,
                 skip_lines=skip,
                 headless=headless,
-                timeout=timeout
+                timeout=timeout,
             )
-            log(f"Successfully captured {results['successful_captures']} screenshots", "success")
+            log(
+                f"Successfully captured {results['successful_captures']} screenshots",
+                "success",
+            )
 
         elif mode == "investigate":
             log("BATCH DOMAIN INVESTIGATION", "info")
@@ -310,11 +334,11 @@ def batch_process(
                 domains_file, output_dir=output, timeout=timeout, skip_lines=skip
             )
             log("Batch investigation completed", "success")
-        
+
         duration = time.time() - start_time
         log(f"Batch processing completed in {duration:.2f} seconds", "success")
         log(f"Results saved to {output}/", "success")
-            
+
     except Exception as e:
         error_handler.handle_exception(e, f"Error during batch {mode} processing")
         click.echo(f"Batch processing failed. Error: {str(e)}")
@@ -325,6 +349,88 @@ def batch_process(
 def report():
     """Commands for reporting malicious domains."""
     pass
+
+
+@cli.group()
+def ip():
+    """Commands for IP-related operations."""
+    pass
+
+
+@ip.command("find-domains")
+@click.argument("ip_address")
+@click.option("--api-key", help="Your Reverse IP API key", envvar="WHOISXML_API_KEY")
+@click.option("--output", "-o", help="Output file path for results", type=click.Path())
+@click.option(
+    "--save-format",
+    type=click.Choice(["txt", "json", "csv"]),
+    default="txt",
+    help="Format to save the results (txt, json, or csv)",
+)
+def find_domains_by_ip(
+    ip_address: str,
+    api_key: str,
+    output: Optional[str] = None,
+    save_format: str = "txt",
+):
+    """Find all domains that resolve to a specific IP address using the Reverse IP API."""
+    if not api_key:
+        click.echo(
+            "Error: API key is required. Set the WHOISXML_API_KEY environment variable or use --api-key"
+        )
+        sys.exit(1)
+
+    log(f"Starting domain lookup for IP address: {ip_address}", "info")
+    start_time = time.time()
+
+    try:
+        # Get the domains using the domain_finder module
+        domains = get_domains_for_ip(api_key, ip_address)
+
+        # Display results
+        if domains:
+            log(f"Found {len(domains)} domains pointing to {ip_address}", "success")
+            for domain in domains[:10]:  # Show first 10 domains
+                click.echo(domain)
+            if len(domains) > 10:
+                click.echo(f"... and {len(domains) - 10} more domains")
+        else:
+            log(f"No domains found for IP address {ip_address}", "info")
+
+        # Save results if output is specified
+        if output:
+            # Create directory if it doesn't exist
+            output_dir = os.path.dirname(output)
+            if output_dir:
+                os.makedirs(output_dir, exist_ok=True)
+
+            # Default output name if not provided
+            if not output:
+                output = f"ip_domains_{ip_address.replace('.', '_')}.{save_format}"
+
+            # Save in the specified format
+            if save_format == "txt":
+                with open(output, "w") as f:
+                    for domain in domains:
+                        f.write(domain + "\n")
+            elif save_format == "json":
+                with open(output, "w") as f:
+                    json.dump({"ip": ip_address, "domains": domains}, f, indent=2)
+            elif save_format == "csv":
+                with open(output, "w") as f:
+                    f.write("domain\n")
+                    for domain in domains:
+                        f.write(f"{domain}\n")
+
+            log(f"Results saved to {output}", "success")
+
+        duration = time.time() - start_time
+        log(f"Domain lookup completed in {duration:.2f} seconds", "success")
+
+    except Exception as e:
+        error_handler.handle_exception(e, "Error during domain lookup")
+        click.echo(f"Domain lookup failed. Error: {str(e)}")
+        sys.exit(1)
 
 
 @report.command("cloudflare")
@@ -419,12 +525,18 @@ def report_to_cloudflare(
                 report_data = json.load(f)
             log(f"Loaded report information from {report_fields}", "success")
         except Exception as e:
-            error_handler.handle_exception(e, f"Error loading report fields from {report_fields}")
-            click.echo(f"Error loading report fields. Please check file format: {report_fields}")
+            error_handler.handle_exception(
+                e, f"Error loading report fields from {report_fields}"
+            )
+            click.echo(
+                f"Error loading report fields. Please check file format: {report_fields}"
+            )
             return
     else:
         # Get report information from user
-        console.print("[bold]Please provide the following information for your reports:[/bold]")
+        console.print(
+            "[bold]Please provide the following information for your reports:[/bold]"
+        )
 
         report_data = {
             "name": click.prompt("Your name"),
@@ -469,7 +581,7 @@ def report_to_cloudflare(
             evidence_dir=evidence_dir,
             use_evidence=use_evidence,
         )
-        
+
         duration = time.time() - start_time
         log(f"Reporting process completed in {duration:.2f} seconds", "success")
         log(f"Results saved to {output}", "success")
@@ -482,8 +594,9 @@ def report_to_cloudflare(
 @cli.command("version")
 def version():
     """Show the version of ScamRecon."""
-    click.echo("ScamRecon v0.2.0 (Refactored)")
+    click.echo("ScamRecon v0.2.1 (Refactored)")
 
 
 if __name__ == "__main__":
     cli()
+

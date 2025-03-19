@@ -77,3 +77,13 @@ URLSCAN_API_KEY=your_key_here
 3. Install development dependencies: `uv pip install -e ".[dev]"`
 4. Run tests: `pytest`
 
+## TODO
+
+Check these IPs
+
+2606:4700::6812:1430
+2606:4700::6812:1530
+2a03:f480:1:d::cd
+46.36.216.64
+72.52.4.119
+104.18.20.48
