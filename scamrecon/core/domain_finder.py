@@ -34,7 +34,6 @@ def get_domains_for_ip(api_key, ip_address):
 
         # Parse the JSON response
         data = response.json()
-        print(data)
 
         # Check if there are domains in the response
         if "result" not in data or len(data["result"]) == 0:
@@ -62,7 +61,6 @@ if __name__ == "__main__":
     # Replace with your actual API key
     load_dotenv()
     API_KEY = os.getenv("WHOISXML_API_KEY")
-    print(API_KEY)
 
     # The IP address to look up
     ip_to_lookup = input("Enter IP address to look up: ")
