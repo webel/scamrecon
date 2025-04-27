@@ -282,9 +282,11 @@ def batch_process(
     mode: str = "tech",
     timeout: int = 20,
     skip: int = 0,
+    limit: Optional[int] = None,
     headless: bool = True,
 ):
     """Process multiple domains from a file."""
+    # TODO implement limit option for all modes of batch processing
     # Check file exists (redundant with click.Path(exists=True) but good for clarity)
     if not os.path.exists(domains_file):
         click.echo(f"Error: File not found: {domains_file}")
@@ -331,7 +333,7 @@ def batch_process(
             log("BATCH DOMAIN INVESTIGATION", "info")
             # Use existing batch_investigate_domains function (not yet refactored)
             batch_investigate_domains(
-                domains_file, output_dir=output, timeout=timeout, skip_lines=skip
+                domains_file, output_dir=output, timeout=timeout, skip_lines=skip, limit=limit
             )
             log("Batch investigation completed", "success")
 
@@ -404,25 +406,25 @@ def find_domains_by_ip(
             if output_dir:
                 os.makedirs(output_dir, exist_ok=True)
 
-            # Default output name if not provided
-            if not output:
-                output = f"ip_domains_{ip_address.replace('.', '_')}.{save_format}"
+        # Default output name if not provided
+        if not output:
+            output = f"ip_domains_{ip_address.replace('.', '_')}.{save_format}"
 
-            # Save in the specified format
-            if save_format == "txt":
-                with open(output, "w") as f:
-                    for domain in domains:
-                        f.write(domain + "\n")
-            elif save_format == "json":
-                with open(output, "w") as f:
-                    json.dump({"ip": ip_address, "domains": domains}, f, indent=2)
-            elif save_format == "csv":
-                with open(output, "w") as f:
-                    f.write("domain\n")
-                    for domain in domains:
-                        f.write(f"{domain}\n")
+        # Save in the specified format
+        if save_format == "txt":
+            with open(output, "w") as f:
+                for domain in domains:
+                    f.write(domain + "\n")
+        elif save_format == "json":
+            with open(output, "w") as f:
+                json.dump({"ip": ip_address, "domains": domains}, f, indent=2)
+        elif save_format == "csv":
+            with open(output, "w") as f:
+                f.write("domain\n")
+                for domain in domains:
+                    f.write(f"{domain}\n")
 
-            log(f"Results saved to {output}", "success")
+        log(f"Results saved to {output}", "success")
 
         duration = time.time() - start_time
         log(f"Domain lookup completed in {duration:.2f} seconds", "success")
@@ -599,4 +601,3 @@ def version():
 
 if __name__ == "__main__":
     cli()
-

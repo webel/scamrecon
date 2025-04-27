@@ -1393,6 +1393,7 @@ def batch_investigate_domains(
     output_dir: str = "investigation_results",
     timeout: int = 10,
     skip_lines: int = 0,
+    limit: int = 0,
 ) -> None:
     """
     Investigate multiple domains from a CSV file.
@@ -1415,7 +1416,11 @@ def batch_investigate_domains(
 
     # Load domains
     try:
-        df = pd.read_csv(csv_file, skiprows=skip_lines)
+        df = pd.read_csv(
+            csv_file,
+            skiprows=skip_lines,
+            nrows=limit,
+        )
         log(
             f"Loaded {len(df)} entries from {csv_file} (skipped {skip_lines} lines)",
             "success",
