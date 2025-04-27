@@ -274,6 +274,9 @@ def batch():
     "--skip", help="Number of lines to skip from the domains file", default=0, type=int
 )
 @click.option(
+    "--limit", help="Limit number of domains to process", default=None, type=int
+)
+@click.option(
     "--headless/--no-headless", default=True, help="Run browser in headless mode"
 )
 def batch_process(
@@ -333,7 +336,11 @@ def batch_process(
             log("BATCH DOMAIN INVESTIGATION", "info")
             # Use existing batch_investigate_domains function (not yet refactored)
             batch_investigate_domains(
-                domains_file, output_dir=output, timeout=timeout, skip_lines=skip, limit=limit
+                domains_file,
+                output_dir=output,
+                timeout=timeout,
+                skip_lines=skip,
+                limit=limit,
             )
             log("Batch investigation completed", "success")
 
